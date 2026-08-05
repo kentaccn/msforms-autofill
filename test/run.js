@@ -97,8 +97,12 @@ const server = http.createServer((_req, res) => {
     document.querySelector('input[value="Alpha"]').click();
     document.querySelector('input[value="Gamma"]').click();
     document.querySelector('input[aria-label="Other answer"][role="checkbox"]').click();
-    document.querySelector('input[data-automation-id="textInput"][aria-label="Other answer"]').value = 'Something else';
     document.querySelector('input[value="Right"]').click();
+  });
+  // The mock mounts the Other text box asynchronously, as Forms does.
+  await page.waitForSelector('input[data-automation-id="textInput"][aria-label="Other answer"]', { timeout: 5000 });
+  await page.evaluate(() => {
+    document.querySelector('input[data-automation-id="textInput"][aria-label="Other answer"]').value = 'Something else';
   });
   const page2Before = await snap();
   await panel('#save');
@@ -113,8 +117,8 @@ const server = http.createServer((_req, res) => {
     'Likert stored per row, not collapsed',
     stored.answers.rAAA3 &&
       stored.answers.rAAA3.type === 'radioRows' &&
-      stored.answers.rAAA3.value.rAAA3_row1 === 'Agree' &&
-      stored.answers.rAAA3.value.rAAA3_row2 === 'Disagree',
+      Object.keys(stored.answers.rAAA3.value).length === 2 &&
+      Object.values(stored.answers.rAAA3.value).sort().join(',') === 'Agree,Disagree',
     JSON.stringify(stored.answers.rAAA3)
   );
   check('date never saved', !ids.includes('rAAA4'), JSON.stringify(ids));
@@ -156,6 +160,33 @@ const server = http.createServer((_req, res) => {
     JSON.stringify(page2After.chosen) === JSON.stringify(page2Before.chosen) &&
       page2After.text.includes('Something else'),
     `${JSON.stringify(page2Before)} vs ${JSON.stringify(page2After)}`
+  );
+
+  // Clearing a field and saving must actually clear it, without touching the
+  // answers belonging to the page that isn't currently rendered.
+  await page.goto(URL_MOCK, { waitUntil: 'domcontentloaded' });
+  await sleep(300);
+  await inject();
+  await sleep(1500);
+  await page.evaluate(() => {
+    document.querySelector('input[data-automation-id="textInput"]').value = '';
+    document.querySelector('textarea').value = '';
+  });
+  await panel('#save');
+  await sleep(500);
+  const afterClear = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem('msformsAutofill:msforms:MOCKFORM123'))
+  );
+  const keptIds = Object.keys(afterClear.answers);
+  check(
+    'clearing a field removes it from storage',
+    !keptIds.includes('rAAA1') && !keptIds.includes('rAAA2'),
+    JSON.stringify(keptIds)
+  );
+  check(
+    'clearing page 1 does not touch page 2 answers',
+    keptIds.includes('rBBB1') && keptIds.includes('rBBB2') && keptIds.includes('rAAA3'),
+    JSON.stringify(keptIds)
   );
 
   console.log(`\n${failures.length ? 'FAILED: ' + failures.join(', ') : 'All checks passed.'}`);

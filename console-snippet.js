@@ -83,18 +83,34 @@
   const checksIn = (item) => Array.from(item.querySelectorAll('input[role="checkbox"]'));
 
   /* A plain single-choice question has one radio group; a Likert grid has one
-     per row, distinguished by the input `name`. */
+     per row. Prefer the structural [role="radiogroup"] container, since `name`
+     can be reused or omitted across rows of the same grid, which would collapse
+     every row into one group and lose all but the first answer. */
   function radioGroups(item) {
     const groups = new Map();
+    const containers = Array.from(item.querySelectorAll('[role="radiogroup"]'));
+    const structural = containers.length > 1;
     for (const el of radiosIn(item)) {
-      const key = el.name || '';
+      let key;
+      if (structural) {
+        const box = el.closest('[role="radiogroup"]');
+        const idx = containers.indexOf(box);
+        key = 'g:' + (box ? box.getAttribute('aria-label') || box.id || idx : '?');
+      } else {
+        key = 'n:' + (el.name || '');
+      }
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(el);
     }
     return groups;
   }
 
-  /** The main free-text input, excluding the "Other" box and any combobox. */
+  /* Roles that mean "not a plain text box". Excluding *any* role was too broad —
+     a legitimate input can carry role="textbox". */
+  const NON_TEXT_ROLES = ['combobox', 'listbox', 'checkbox', 'radio', 'button', 'spinbutton'];
+  const isNonTextControl = (el) => NON_TEXT_ROLES.includes(el.getAttribute('role'));
+
+  /** The main free-text input, excluding the "Other" box and any dropdown. */
   function textInputIn(item) {
     const all = Array.from(
       item.querySelectorAll(
@@ -104,19 +120,23 @@
     return (
       all.find(
         (el) =>
-          // A role means it's a combobox/dropdown, not a plain text field —
-          // writing a string into one of those doesn't select anything.
-          !el.hasAttribute('role') &&
+          !isNonTextControl(el) &&
           !SKIP_TEXT_LABELS.includes(el.getAttribute('aria-label'))
       ) || null
     );
   }
 
-  /* The "Other" CHECKBOX carries the same aria-label as its text box, so the
-     selector has to pin the text one via data-automation-id / absence of role. */
+  /* The "Other" CHECKBOX carries the same aria-label as its text box, so pin
+     the text one by element shape rather than by the label alone. */
   function otherInputIn(item) {
-    return item.querySelector(
-      `input[aria-label="Other answer"]:not([role]), textarea[aria-label="Other answer"]:not([role])`
+    return (
+      Array.from(item.querySelectorAll('input, textarea')).find(
+        (el) =>
+          el.getAttribute('aria-label') === 'Other answer' &&
+          !isNonTextControl(el) &&
+          el.type !== 'checkbox' &&
+          el.type !== 'radio'
+      ) || null
     );
   }
 
@@ -138,18 +158,21 @@
   function readAnswers() {
     const out = {};
     const unsupported = [];
-    const present = []; // questions on THIS page — their current state is authoritative
+    // Only questions we fully recognise on THIS page are authoritative. An
+    // unsupported or half-mounted question must NOT count, or saving would
+    // delete its stored answer just because we couldn't read it.
+    const authoritative = [];
     for (const item of questionItems()) {
       const id = questionId(item);
       if (!id) continue;
-      present.push(id);
       const type = questionType(item);
       if (type === 'unknown') {
-        // Rating / ranking / Likert / dropdown — say so rather than silently drop.
+        // Ranking / dropdown / rating — say so rather than silently drop.
         unsupported.push(questionTitle(item));
         continue;
       }
       if (type === 'date') continue;
+      authoritative.push(id);
 
       const record = { title: questionTitle(item), type };
 
@@ -186,7 +209,7 @@
 
       out[id] = record;
     }
-    return { answers: out, unsupported, present };
+    return { answers: out, unsupported, authoritative };
   }
 
   // ---------------------------------------------------------------- writing
@@ -220,6 +243,7 @@
     return new Promise((resolve) => {
       const started = Date.now();
       const tick = () => {
+        if (teardown.signal.aborted) return resolve(null);
         const found = get();
         if (found) return resolve(found);
         if (Date.now() - started > timeoutMs) return resolve(null);
@@ -229,9 +253,20 @@
     });
   }
 
+  /* A saved record may only be applied to a question that still has the same
+     shape. Forms authors can repurpose a question and keep its QuestionId, and
+     writing an old answer into it would silently submit something wrong. */
+  const RECORD_FITS = {
+    text: (t) => t === 'text',
+    radio: (t) => t === 'radio',
+    radioRows: (t) => t === 'radio',
+    checkbox: (t) => t === 'checkbox',
+  };
+
   async function fillAnswers(saved) {
     let filled = 0;
     const skipped = [];
+    const mismatched = [];
     const pendingOther = [];
 
     for (const item of questionItems()) {
@@ -244,6 +279,12 @@
       }
       const record = id && saved[id];
       if (!record) continue;
+
+      const fits = RECORD_FITS[record.type];
+      if (!fits || !fits(type)) {
+        mismatched.push(questionTitle(item));
+        continue;
+      }
 
       let changed = false;
 
@@ -280,16 +321,25 @@
 
       if (changed) filled++;
       // Ticking "Other" makes React mount its text box a beat later, so the
-      // free-text write has to wait for that box to actually exist.
-      if (record.other) pendingOther.push({ item, text: record.other });
+      // free-text write has to wait for that box to actually exist. Test for
+      // presence, not truthiness, so a saved empty string clears stale text.
+      if ('other' in record) pendingOther.push({ id, text: record.other || '' });
     }
 
-    for (const { item, text } of pendingOther) {
-      const el = await waitFor(() => otherInputIn(item));
-      if (el && el.value !== text) setNativeValue(el, text);
-    }
+    // Re-look-up by question id on each poll: React can replace the question
+    // node, which would leave us writing into a detached subtree. Waiting in
+    // parallel keeps several missing boxes from costing 2s each.
+    await Promise.all(
+      pendingOther.map(async ({ id, text }) => {
+        const el = await waitFor(() => {
+          const item = questionItems().find((q) => questionId(q) === id);
+          return item ? otherInputIn(item) : null;
+        });
+        if (el && el.value !== text) setNativeValue(el, text);
+      })
+    );
 
-    return { filled, skipped };
+    return { filled, skipped, mismatched };
   }
 
   // ---------------------------------------------------------------- storage
@@ -299,16 +349,37 @@
     return 'msforms:' + (id || location.pathname);
   };
 
+  /* chrome.storage reports failures (quota, disabled) through runtime.lastError
+     rather than throwing. Ignoring it meant reporting "Saved" after a failure. */
+  const lastError = () =>
+    (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.lastError) || null;
+
   const load = () =>
-    new Promise((resolve) =>
-      chrome.storage.local.get([storageKey()], (r) => resolve(r[storageKey()] || null))
+    new Promise((resolve, reject) =>
+      chrome.storage.local.get([storageKey()], (r) => {
+        const err = lastError();
+        if (err) return reject(new Error(err.message || 'storage read failed'));
+        resolve(r[storageKey()] || null);
+      })
     );
 
   const save = (data) =>
-    new Promise((resolve) => chrome.storage.local.set({ [storageKey()]: data }, resolve));
+    new Promise((resolve, reject) =>
+      chrome.storage.local.set({ [storageKey()]: data }, () => {
+        const err = lastError();
+        if (err) return reject(new Error(err.message || 'storage write failed'));
+        resolve();
+      })
+    );
 
   const wipe = () =>
-    new Promise((resolve) => chrome.storage.local.remove([storageKey()], resolve));
+    new Promise((resolve, reject) =>
+      chrome.storage.local.remove([storageKey()], () => {
+        const err = lastError();
+        if (err) return reject(new Error(err.message || 'storage clear failed'));
+        resolve();
+      })
+    );
 
   // ------------------------------------------------------------------- UI
 
@@ -413,59 +484,100 @@
   }
 
   let filling = false;
+  let refillWanted = false;
 
+  /* Serialised rather than dropped: a fill requested while another is running
+     used to be discarded, and since the page watcher had already marked that
+     page handled, nothing ever retried it. */
   async function doFill(auto) {
-    if (filling) return; // double-click / auto+manual overlap would double-toggle checkboxes
+    if (filling) {
+      refillWanted = true;
+      return;
+    }
     filling = true;
     try {
-      const saved = await load();
+      do {
+        refillWanted = false;
+        await runFill(auto);
+      } while (refillWanted && !teardown.signal.aborted);
+    } finally {
+      filling = false;
+    }
+  }
+
+  async function runFill(auto) {
+    let saved;
+    try {
+      saved = await load();
+    } catch (e) {
+      setStatus(`Couldn't read saved answers: ${e.message}`);
+      return;
+    }
+    if (teardown.signal.aborted) return;
+    {
       if (!saved || !Object.keys(saved.answers || {}).length) {
         setStatus('Nothing saved for this form yet.');
         return;
       }
-      const { filled, skipped } = await fillAnswers(saved.answers);
-      if (auto && !filled) return; // silent no-op on pages with nothing to restore
+      const { filled, skipped, mismatched } = await fillAnswers(saved.answers);
+      if (auto && !filled && !mismatched.length) return; // nothing to restore here
       const tail = skipped.length
         ? ` · ${skipped.length} date field${skipped.length === 1 ? '' : 's'} left for you`
         : '';
-      setStatus(`${auto ? 'Auto-filled' : 'Filled'} ${filled} question${filled === 1 ? '' : 's'}${tail}`);
-    } finally {
-      filling = false;
+      const warn = mismatched.length
+        ? ` · ${mismatched.length} question${mismatched.length === 1 ? '' : 's'} changed, skipped`
+        : '';
+      setStatus(
+        `${auto ? 'Auto-filled' : 'Filled'} ${filled} question${filled === 1 ? '' : 's'}${tail}${warn}`
+      );
     }
   }
 
   $('#fill').addEventListener('click', () => doFill(false));
 
   $('#save').addEventListener('click', async () => {
-    const { answers, unsupported, present } = readAnswers();
-    const n = Object.keys(answers).length;
-    if (!n) {
-      setStatus('Nothing to save — answer the form first.');
+    const { answers, unsupported, authoritative } = readAnswers();
+    if (!authoritative.length) {
+      setStatus('Nothing to save — no fillable questions on this page.');
       return;
     }
-    const prev = await load();
-    // Keep answers from pages that aren't in the DOM right now (multi-page forms),
-    // but let this page win outright — so clearing a field really clears it.
-    const merged = Object.assign({}, prev && prev.answers);
-    for (const id of present) delete merged[id];
-    Object.assign(merged, answers);
-    const total = Object.keys(merged).length;
-    await save({ answers: merged, savedAt: Date.now(), auto: prev ? prev.auto : false });
-    const extra = unsupported.length ? ` · ${unsupported.length} unsupported skipped` : '';
-    setStatus(`Saved ${n} field${n === 1 ? '' : 's'} (${total} total, date not saved)${extra}`);
+    try {
+      const prev = await load();
+      // Keep answers from pages not currently in the DOM (multi-page forms), but
+      // let this page win outright, so clearing a field really clears it — including
+      // the case where every field on the page was cleared.
+      const merged = Object.assign({}, prev && prev.answers);
+      for (const id of authoritative) delete merged[id];
+      Object.assign(merged, answers);
+      const n = Object.keys(answers).length;
+      const total = Object.keys(merged).length;
+      await save({ answers: merged, savedAt: Date.now(), auto: prev ? prev.auto : false });
+      const extra = unsupported.length ? ` · ${unsupported.length} unsupported skipped` : '';
+      setStatus(`Saved ${n} field${n === 1 ? '' : 's'} (${total} total, date not saved)${extra}`);
+    } catch (e) {
+      setStatus(`Save failed: ${e.message}`);
+    }
   });
 
   $('#clear').addEventListener('click', async () => {
-    await wipe();
-    $('#auto').checked = false;
-    setStatus('Cleared.');
+    try {
+      await wipe();
+      $('#auto').checked = false;
+      setStatus('Cleared.');
+    } catch (e) {
+      setStatus(`Clear failed: ${e.message}`);
+    }
   });
 
   $('#auto').addEventListener('change', async (e) => {
-    const prev = (await load()) || { answers: {}, savedAt: null };
-    prev.auto = e.target.checked;
-    await save(prev);
-    setStatus(e.target.checked ? 'Will fill on load.' : 'Auto-fill off.');
+    try {
+      const prev = (await load()) || { answers: {}, savedAt: null };
+      prev.auto = e.target.checked;
+      await save(prev);
+      setStatus(e.target.checked ? 'Will fill on load.' : 'Auto-fill off.');
+    } catch (err) {
+      setStatus(`Couldn't save that setting: ${err.message}`);
+    }
   });
 
   $('.collapse').addEventListener('click', (e) => {
@@ -484,16 +596,19 @@
       if (!e.altKey || e.metaKey || e.ctrlKey || e.code !== 'KeyF') return;
       if (e.repeat || e.isComposing) return;
       // On macOS Option+F types "ƒ" — don't steal it mid-sentence in a form field.
-      const el = document.activeElement;
-      if (
-        el &&
-        (el.tagName === 'INPUT' ||
-          el.tagName === 'TEXTAREA' ||
-          el.tagName === 'SELECT' ||
-          el.isContentEditable)
-      ) {
-        return;
-      }
+      // composedPath() is needed because document.activeElement only reports the
+      // shadow host when focus is inside a shadow tree.
+      const path = typeof e.composedPath === 'function' ? e.composedPath() : [e.target];
+      const typing = path.some(
+        (el) =>
+          el &&
+          el.nodeType === 1 &&
+          (el.tagName === 'INPUT' ||
+            el.tagName === 'TEXTAREA' ||
+            el.tagName === 'SELECT' ||
+            el.isContentEditable)
+      );
+      if (typing) return;
       e.preventDefault();
       doFill(false);
     },
@@ -532,6 +647,10 @@
       const obs = new MutationObserver(check);
       obs.observe(document.documentElement, { childList: true, subtree: true });
       const poll = setInterval(check, 200);
+      // Disposing mid-wait has to stop this too, or a console re-paste during
+      // the first seconds leaves the old copy polling and it appends its panel
+      // after being torn down.
+      teardown.signal.addEventListener('abort', () => finish(false));
       check();
     });
   }
@@ -544,17 +663,38 @@
   /* Multi-page forms swap the question set in place when you hit Next, so
      auto-fill has to re-run on each new page, not just once at load. */
   function watchForPageChange() {
+    // Adding an abort listener to an already-aborted signal never fires, which
+    // would leave this observer running forever after a dispose.
+    if (teardown.signal.aborted) return;
+
     let last = pageSignature();
     let timer;
+    let firstSeen = 0;
+
+    const settle = () => {
+      timer = null;
+      firstSeen = 0;
+      const sig = pageSignature();
+      if (sig === last || !sig) return;
+      load()
+        .then((saved) => {
+          if (teardown.signal.aborted) return;
+          // Mark handled only once the fill has actually been requested and
+          // finished, otherwise a dropped fill is never retried.
+          if (saved && saved.auto) return doFill(true).then(() => { last = sig; });
+          last = sig;
+        })
+        .catch(() => {});
+    };
+
     const obs = new MutationObserver(() => {
+      const now = Date.now();
+      if (!firstSeen) firstSeen = now;
       clearTimeout(timer);
-      timer = setTimeout(async () => {
-        const sig = pageSignature();
-        if (sig === last || !sig) return;
-        last = sig;
-        const saved = await load();
-        if (saved && saved.auto) doFill(true);
-      }, 500);
+      // Forms mutates continuously, so a plain resettable debounce can be pushed
+      // back indefinitely. Cap the total wait.
+      if (now - firstSeen >= 2000) return settle();
+      timer = setTimeout(settle, 500);
     });
     obs.observe(document.documentElement, { childList: true, subtree: true });
     teardown.signal.addEventListener('abort', () => {
@@ -576,13 +716,24 @@
     // Only surface the panel once this really is a form with questions —
     // the match patterns also cover dashboards and the form editor.
     const ready = await whenQuestionsReady();
-    if (!ready) return;
+    if (!ready || teardown.signal.aborted) return;
 
     document.documentElement.appendChild(host);
-    const saved = await load();
+
+    let saved = null;
+    try {
+      saved = await load();
+    } catch (e) {
+      setStatus(`Couldn't read saved answers: ${e.message}`);
+    }
+    if (teardown.signal.aborted) return;
+
     $('#auto').checked = !!(saved && saved.auto);
     setStatus(describe(saved));
-    if (saved && saved.auto) await doFill(true);
+
+    // Watch BEFORE the first fill: pressing Next while that fill is still
+    // waiting on an Other box would otherwise leave the new page unfilled.
     watchForPageChange();
+    if (saved && saved.auto) await doFill(true);
   })();
 })();
