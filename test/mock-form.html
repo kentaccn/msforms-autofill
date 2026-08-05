@@ -1,0 +1,107 @@
+<!doctype html>
+<!-- Mock Microsoft Form: same automation-ids / attribute shapes as the real
+     responsepage.aspx DOM, but with question types the PolyU form doesn't have.
+     Used to prove the extension isn't specific to that one form. -->
+<html>
+<head><meta charset="utf-8"><title>Mock Form</title></head>
+<body>
+<div id="pages"></div>
+<button id="next">Next</button>
+
+<script>
+const PAGE1 = `
+  <div data-automation-id="questionItem">
+    <div id="QuestionId_rAAA1">
+      <div><span data-automation-id="questionOrdinal">1</span></div>
+      <div data-automation-id="questionTitle"><span role="heading">
+        <span class="text-format-content">Your name</span>
+        <span data-automation-id="requiredStar"></span>
+        <span id="QuestionInfo_rAAA1">Single line text. </span>
+      </span></div>
+    </div>
+    <input data-automation-id="textInput" aria-label="Single line text" placeholder="Enter your answer">
+  </div>
+
+  <div data-automation-id="questionItem">
+    <div id="QuestionId_rAAA2">
+      <div data-automation-id="questionTitle"><span role="heading">
+        <span class="text-format-content">Tell us more</span>
+        <span id="QuestionInfo_rAAA2">Long text. </span>
+      </span></div>
+    </div>
+    <textarea data-automation-id="textInput" aria-label="Long text"></textarea>
+  </div>
+
+  <!-- Likert grid: two rows, SAME option values in both. This is the case that
+       silently collapsed to one answer before the radio-group fix. -->
+  <div data-automation-id="questionItem">
+    <div id="QuestionId_rAAA3">
+      <div data-automation-id="questionTitle"><span role="heading">
+        <span class="text-format-content">Rate the following</span>
+      </span></div>
+    </div>
+    <div role="radiogroup" aria-label="Food">
+      <input name="rAAA3_row1" role="radio" type="radio" aria-checked="false" value="Agree">
+      <input name="rAAA3_row1" role="radio" type="radio" aria-checked="false" value="Neutral">
+      <input name="rAAA3_row1" role="radio" type="radio" aria-checked="false" value="Disagree">
+    </div>
+    <div role="radiogroup" aria-label="Service">
+      <input name="rAAA3_row2" role="radio" type="radio" aria-checked="false" value="Agree">
+      <input name="rAAA3_row2" role="radio" type="radio" aria-checked="false" value="Neutral">
+      <input name="rAAA3_row2" role="radio" type="radio" aria-checked="false" value="Disagree">
+    </div>
+  </div>
+
+  <div data-automation-id="questionItem">
+    <div id="QuestionId_rAAA4">
+      <div data-automation-id="questionTitle"><span role="heading">
+        <span class="text-format-content">When</span>
+      </span></div>
+    </div>
+    <div data-automation-id="dateContainer">
+      <input type="text" id="DatePicker0-label" role="combobox" placeholder="Please input date (M/d/yyyy)">
+    </div>
+  </div>
+`;
+
+const PAGE2 = `
+  <div data-automation-id="questionItem">
+    <div id="QuestionId_rBBB1">
+      <div data-automation-id="questionTitle"><span role="heading">
+        <span class="text-format-content">Which apply</span>
+      </span></div>
+    </div>
+    <input name="rBBB1" role="checkbox" type="checkbox" aria-checked="false" value="Alpha">
+    <input name="rBBB1" role="checkbox" type="checkbox" aria-checked="false" value="Beta">
+    <input name="rBBB1" role="checkbox" type="checkbox" aria-checked="false" value="Gamma">
+    <input name="rBBB1" role="checkbox" type="checkbox" aria-checked="false" value="" aria-label="Other answer">
+    <input data-automation-id="textInput" aria-label="Other answer" placeholder="Other">
+  </div>
+
+  <div data-automation-id="questionItem">
+    <div id="QuestionId_rBBB2">
+      <div data-automation-id="questionTitle"><span role="heading">
+        <span class="text-format-content">Pick one</span>
+      </span></div>
+    </div>
+    <input name="rBBB2" role="radio" type="radio" aria-checked="false" value="Left">
+    <input name="rBBB2" role="radio" type="radio" aria-checked="false" value="Right">
+  </div>
+`;
+
+const pages = document.getElementById('pages');
+pages.innerHTML = PAGE1;
+document.getElementById('next').onclick = () => { pages.innerHTML = PAGE2; };
+
+// Mirror the real page: keep aria-checked in sync so isChecked() sees the truth.
+document.addEventListener('click', (e) => {
+  const el = e.target;
+  if (!(el.matches && el.matches('input[role="radio"], input[role="checkbox"]'))) return;
+  if (el.type === 'radio') {
+    document.querySelectorAll(`input[name="${el.name}"]`).forEach((s) => s.setAttribute('aria-checked', 'false'));
+  }
+  el.setAttribute('aria-checked', String(el.checked));
+});
+</script>
+</body>
+</html>

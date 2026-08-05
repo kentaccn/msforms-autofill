@@ -1,0 +1,14 @@
+{
+  "name": "msforms-autofill",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Chrome extension that saves your answers on a Microsoft Form and refills them on later visits.",
+  "scripts": {
+    "build": "node build-console.js",
+    "test": "node test/run.js"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^23.0.0"
+  },
+  "license": "MIT"
+}
