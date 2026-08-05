@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "MS Forms Autofill",
+  "version": "1.0.0",
+  "description": "Save your answers on a Microsoft Form once, then refill them with one click. Skips date fields.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://forms.cloud.microsoft/*",
+    "https://forms.office.com/*",
+    "https://forms.microsoft.com/*",
+    "https://forms.office365.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://forms.cloud.microsoft/*",
+        "https://forms.office.com/*",
+        "https://forms.microsoft.com/*",
+        "https://forms.office365.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}
